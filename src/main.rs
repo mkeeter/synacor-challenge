@@ -1,5 +1,6 @@
+use rayon::prelude::*;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashSet},
     io::BufRead,
 };
 
@@ -656,8 +657,8 @@ fn main() {
         ",
     );
 
-    // Found using `find_checksum` below, which is very slow
-    game.vm.register[7] = 25734;
+    // Finding the checksum is a bit slow, but not egregious
+    game.vm.register[7] = find_checksum();
 
     game.vm.memory[5507] = 6; // Preload r0 with the correct answer
     game.vm.memory[5511] = 21; // replace calibration call with noop
@@ -777,20 +778,18 @@ fn checksum(r0: u16, r1: u16, r7: u16, seen: &mut [u16]) -> u16 {
     seen[key]
 }
 
-/// Finds a value for r7 such that f(4, 1) == 6
-///
-/// This is very slow, so I only ran it once to find the magic number.
+/// Finds a value for r7 such that `checksum(4, 1) == 6`
 #[allow(unused)]
 fn find_checksum() -> u16 {
-    for i in 1..32767 {
-        let mut seen = vec![u16::MAX; 1 << 18];
-        if i % 1000 == 0 {
-            println!("{i}");
-        }
-        let e = checksum(4, 1, i, &mut seen);
-        if e == 6 {
-            return i;
-        }
-    }
-    panic!("no value found");
+    rayon::ThreadPoolBuilder::new()
+        .stack_size(8 * 1024 * 1024)
+        .build_global()
+        .unwrap();
+    (1..32767)
+        .into_par_iter()
+        .find_any(|i| {
+            let mut seen = vec![u16::MAX; 1 << 18];
+            checksum(4, 1, *i, &mut seen) == 6
+        })
+        .unwrap()
 }
