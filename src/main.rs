@@ -11,29 +11,6 @@ struct Vm {
     ip: usize,
 }
 
-const OP_HALT: u16 = 0;
-const OP_SET: u16 = 1;
-const OP_PUSH: u16 = 2;
-const OP_POP: u16 = 3;
-const OP_EQ: u16 = 4;
-const OP_GT: u16 = 5;
-const OP_JMP: u16 = 6;
-const OP_JT: u16 = 7;
-const OP_JF: u16 = 8;
-const OP_ADD: u16 = 9;
-const OP_MULT: u16 = 10;
-const OP_MOD: u16 = 11;
-const OP_AND: u16 = 12;
-const OP_OR: u16 = 13;
-const OP_NOT: u16 = 14;
-const OP_RMEM: u16 = 15;
-const OP_WMEM: u16 = 16;
-const OP_CALL: u16 = 17;
-const OP_RET: u16 = 18;
-const OP_OUT: u16 = 19;
-const OP_IN: u16 = 20;
-const OP_NOOP: u16 = 21;
-
 #[derive(Copy, Clone, Debug)]
 enum Op {
     Halt,
@@ -168,105 +145,105 @@ impl Vm {
         let op = self.memory[self.ip];
         self.ip += 1;
         match op {
-            OP_HALT => Op::Halt,
-            OP_SET => {
+            0 => Op::Halt,
+            1 => {
                 let a = self.reg();
                 let b = self.val();
                 Op::Set(a, b)
             }
-            OP_PUSH => {
+            2 => {
                 let a = self.val();
                 Op::Push(a)
             }
-            OP_POP => {
+            3 => {
                 let a = self.reg();
                 Op::Pop(a)
             }
-            OP_EQ => {
+            4 => {
                 let a = self.reg();
                 let b = self.val();
                 let c = self.val();
                 Op::Eq(a, b, c)
             }
-            OP_GT => {
+            5 => {
                 let a = self.reg();
                 let b = self.val();
                 let c = self.val();
                 Op::Gt(a, b, c)
             }
-            OP_JMP => {
+            6 => {
                 let a = self.val();
                 Op::Jmp(a)
             }
-            OP_JT => {
+            7 => {
                 let a = self.val();
                 let b = self.val();
                 Op::Jt(a, b)
             }
-            OP_JF => {
+            8 => {
                 let a = self.val();
                 let b = self.val();
                 Op::Jf(a, b)
             }
-            OP_ADD => {
+            9 => {
                 let a = self.reg();
                 let b = self.val();
                 let c = self.val();
                 Op::Add(a, b, c)
             }
-            OP_MULT => {
+            10 => {
                 let a = self.reg();
                 let b = self.val();
                 let c = self.val();
                 Op::Mult(a, b, c)
             }
-            OP_MOD => {
+            11 => {
                 let a = self.reg();
                 let b = self.val();
                 let c = self.val();
                 Op::Mod(a, b, c)
             }
-            OP_AND => {
+            12 => {
                 let a = self.reg();
                 let b = self.val();
                 let c = self.val();
                 Op::And(a, b, c)
             }
-            OP_OR => {
+            13 => {
                 let a = self.reg();
                 let b = self.val();
                 let c = self.val();
                 Op::Or(a, b, c)
             }
-            OP_NOT => {
+            14 => {
                 let a = self.reg();
                 let b = self.val();
                 Op::Not(a, b)
             }
-            OP_RMEM => {
+            15 => {
                 let a = self.reg();
                 let b = self.val();
                 Op::Rmem(a, b)
             }
-            OP_WMEM => {
+            16 => {
                 let a = self.val();
                 let b = self.val();
                 Op::Wmem(a, b)
             }
-            OP_CALL => {
+            17 => {
                 let a = self.val();
                 Op::Call(a)
             }
-            OP_RET => Op::Ret,
-            OP_OUT => {
+            18 => Op::Ret,
+            19 => {
                 let a = self.val();
                 Op::Out(a)
             }
-            OP_IN => {
+            20 => {
                 let a = self.reg();
                 Op::In(a)
             }
-            OP_NOOP => Op::Noop,
+            21 => Op::Noop,
             i => panic!("unimplemented instruction {i}"),
         }
     }
