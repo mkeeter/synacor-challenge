@@ -34,22 +34,80 @@ const OP_OUT: u16 = 19;
 const OP_IN: u16 = 20;
 const OP_NOOP: u16 = 21;
 
-#[derive(Debug)]
+#[derive(Copy, Clone, Debug)]
+enum Op {
+    Halt,
+    Set(Register, Value),
+    Push(Value),
+    Pop(Register),
+    Eq(Register, Value, Value),
+    Gt(Register, Value, Value),
+    Jmp(Value),
+    Jt(Value, Value),
+    Jf(Value, Value),
+    Add(Register, Value, Value),
+    Mult(Register, Value, Value),
+    Mod(Register, Value, Value),
+    And(Register, Value, Value),
+    Or(Register, Value, Value),
+    Not(Register, Value),
+    Rmem(Register, Value),
+    Wmem(Value, Value),
+    Call(Value),
+    Ret,
+    Out(Value),
+    In(Register),
+    Noop,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct Register(u8);
+
+impl std::fmt::Display for Register {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "r{}", self.0)
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
 enum Value {
     Literal(u16),
-    Register(u8),
+    Register(Register),
+}
+
+impl std::fmt::Display for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Value::Literal(i) => write!(f, "{i}"),
+            Value::Register(r) => write!(f, "{r}"),
+        }
+    }
 }
 
 impl From<u16> for Value {
     fn from(t: u16) -> Value {
         match t {
             0..=32767 => Value::Literal(t),
-            32768..=32775 => Value::Register((t - 32768) as u8),
+            32768..=32775 => Value::Register(Register((t - 32768) as u8)),
             _ => panic!("invalid value {t}"),
         }
     }
 }
 
+impl std::ops::Index<Register> for Vm {
+    type Output = u16;
+    fn index(&self, r: Register) -> &Self::Output {
+        &self.register[r.0 as usize]
+    }
+}
+
+impl std::ops::IndexMut<Register> for Vm {
+    fn index_mut(&mut self, r: Register) -> &mut Self::Output {
+        &mut self.register[r.0 as usize]
+    }
+}
+
+#[derive(Debug)]
 enum Status {
     /// Continue with normal operation
     ///
@@ -80,128 +138,223 @@ impl Vm {
             ip: 0,
         }
     }
+
+    /// Gets a value from a register or literal
     fn get(&self, v: Value) -> u16 {
         match v {
             Value::Literal(i) => i,
-            Value::Register(r) => self.register[r as usize],
+            Value::Register(r) => self.register[r.0 as usize],
         }
     }
 
+    /// Reads the value from the instruction pointer, incrementing it
     fn val(&mut self) -> Value {
         let v = self.memory[self.ip].into();
         self.ip += 1;
         v
     }
 
-    fn reg(&mut self) -> usize {
+    /// Reads a register index at the instruction pointer, incrementing it
+    fn reg(&mut self) -> Register {
         let v = self.val();
         let Value::Register(reg) = v else {
             panic!("not a register: {v:?}");
         };
-        reg.into()
+        reg
     }
 
-    fn arg(&mut self) -> u16 {
-        let a = self.memory[self.ip].into();
-        self.ip += 1;
-        self.get(a)
-    }
-
-    fn op<V: Into<u16>, F: Fn(u16, u16) -> V>(&mut self, f: F) {
-        let a = self.reg();
-        let b = self.arg();
-        let c = self.arg();
-        self.register[a] = f(b, c).into() & MASK;
-    }
-
-    fn step(&mut self, input: Option<u8>) -> Status {
+    /// Reads the next opcode from the machine, incrementing `self.ip`
+    fn next(&mut self) -> Op {
         let op = self.memory[self.ip];
         self.ip += 1;
         match op {
-            OP_HALT => return Status::Halt,
+            OP_HALT => Op::Halt,
             OP_SET => {
                 let a = self.reg();
-                let b = self.arg();
-                self.register[a] = b;
+                let b = self.val();
+                Op::Set(a, b)
             }
             OP_PUSH => {
-                let a = self.arg();
-                self.stack.push(a);
+                let a = self.val();
+                Op::Push(a)
             }
             OP_POP => {
                 let a = self.reg();
-                let v = self.stack.pop().unwrap();
-                self.register[a] = v;
+                Op::Pop(a)
             }
-            OP_EQ => self.op(|b, c| b == c),
-            OP_GT => self.op(|b, c| b > c),
+            OP_EQ => {
+                let a = self.reg();
+                let b = self.val();
+                let c = self.val();
+                Op::Eq(a, b, c)
+            }
+            OP_GT => {
+                let a = self.reg();
+                let b = self.val();
+                let c = self.val();
+                Op::Gt(a, b, c)
+            }
             OP_JMP => {
-                let a = self.arg();
-                self.ip = a as usize;
+                let a = self.val();
+                Op::Jmp(a)
             }
             OP_JT => {
-                let a = self.arg();
-                let b = self.arg();
-                if a != 0 {
-                    self.ip = b as usize;
-                }
+                let a = self.val();
+                let b = self.val();
+                Op::Jt(a, b)
             }
             OP_JF => {
-                let a = self.arg();
-                let b = self.arg();
-                if a == 0 {
-                    self.ip = b as usize;
-                }
+                let a = self.val();
+                let b = self.val();
+                Op::Jf(a, b)
             }
-            OP_ADD => self.op(|b, c| b.wrapping_add(c)),
-            OP_MULT => self.op(|b, c| b.wrapping_mul(c)),
-            OP_MOD => self.op(|b, c| b % c),
-            OP_AND => self.op(|b, c| b & c),
-            OP_OR => self.op(|b, c| b | c),
+            OP_ADD => {
+                let a = self.reg();
+                let b = self.val();
+                let c = self.val();
+                Op::Add(a, b, c)
+            }
+            OP_MULT => {
+                let a = self.reg();
+                let b = self.val();
+                let c = self.val();
+                Op::Mult(a, b, c)
+            }
+            OP_MOD => {
+                let a = self.reg();
+                let b = self.val();
+                let c = self.val();
+                Op::Mod(a, b, c)
+            }
+            OP_AND => {
+                let a = self.reg();
+                let b = self.val();
+                let c = self.val();
+                Op::And(a, b, c)
+            }
+            OP_OR => {
+                let a = self.reg();
+                let b = self.val();
+                let c = self.val();
+                Op::Or(a, b, c)
+            }
             OP_NOT => {
                 let a = self.reg();
-                let b = self.arg();
-                self.register[a] = (!b) & MASK;
+                let b = self.val();
+                Op::Not(a, b)
             }
             OP_RMEM => {
                 let a = self.reg();
-                let b = self.arg();
-                self.register[a] = self.memory[b as usize];
+                let b = self.val();
+                Op::Rmem(a, b)
             }
             OP_WMEM => {
-                let a = self.arg() as usize;
-                let b = self.arg();
+                let a = self.val();
+                let b = self.val();
+                Op::Wmem(a, b)
+            }
+            OP_CALL => {
+                let a = self.val();
+                Op::Call(a)
+            }
+            OP_RET => Op::Ret,
+            OP_OUT => {
+                let a = self.val();
+                Op::Out(a)
+            }
+            OP_IN => {
+                let a = self.reg();
+                Op::In(a)
+            }
+            OP_NOOP => Op::Noop,
+            i => panic!("unimplemented instruction {i}"),
+        }
+    }
+
+    fn step(&mut self, input: Option<u8>) -> Status {
+        match self.next() {
+            Op::Halt => return Status::Halt,
+            Op::Set(a, b) => {
+                self[a] = self.get(b);
+            }
+            Op::Push(a) => {
+                self.stack.push(self.get(a));
+            }
+            Op::Pop(a) => {
+                let v = self.stack.pop().unwrap();
+                self[a] = v;
+            }
+            Op::Eq(a, b, c) => {
+                self[a] = (self.get(b) == self.get(c)) as u16;
+            }
+            Op::Gt(a, b, c) => {
+                self[a] = (self.get(b) > self.get(c)) as u16;
+            }
+            Op::Jmp(a) => {
+                self.ip = self.get(a) as usize;
+            }
+            Op::Jt(a, b) => {
+                if self.get(a) != 0 {
+                    self.ip = self.get(b) as usize;
+                }
+            }
+            Op::Jf(a, b) => {
+                if self.get(a) == 0 {
+                    self.ip = self.get(b) as usize;
+                }
+            }
+            Op::Add(a, b, c) => {
+                self[a] = self.get(b).wrapping_add(self.get(c)) & MASK;
+            }
+            Op::Mult(a, b, c) => {
+                self[a] = self.get(b).wrapping_mul(self.get(c)) & MASK;
+            }
+            Op::Mod(a, b, c) => {
+                self[a] = (self.get(b) % self.get(c)) & MASK;
+            }
+            Op::And(a, b, c) => {
+                self[a] = (self.get(b) & self.get(c)) & MASK;
+            }
+            Op::Or(a, b, c) => {
+                self[a] = (self.get(b) | self.get(c)) & MASK;
+            }
+            Op::Not(a, b) => {
+                self[a] = !self.get(b) & MASK;
+            }
+            Op::Rmem(a, b) => {
+                self[a] = self.memory[self.get(b) as usize];
+            }
+            Op::Wmem(a, b) => {
+                let a = self.get(a) as usize;
                 if a >= self.memory.len() {
                     self.memory.resize(a + 1, 0);
                 }
-                self.memory[a] = b;
+                self.memory[a] = self.get(b)
             }
-            OP_CALL => {
-                let a = self.arg();
+            Op::Call(a) => {
                 self.stack.push(self.ip.try_into().unwrap());
-                self.ip = a as usize;
+                self.ip = self.get(a) as usize;
             }
-            OP_RET => {
+            Op::Ret => {
                 let Some(r) = self.stack.pop() else {
                     return Status::Halt;
                 };
                 self.ip = r as usize;
             }
-            OP_OUT => {
-                let a = self.arg();
-                return Status::Out(a.try_into().expect("invalid char"));
+            Op::Out(a) => {
+                return Status::Out(
+                    self.get(a).try_into().expect("invalid char"),
+                );
             }
-            OP_IN => {
+            Op::In(a) => {
                 let Some(i) = input else {
-                    self.ip -= 1;
+                    self.ip -= 2;
                     return Status::NeedsInput;
                 };
-                let a = self.reg();
-                self.register[a] = i as u16;
+                self[a] = i as u16;
                 return Status::Continue(true);
             }
-            OP_NOOP => (),
-            i => panic!("unimplemented instruction {i}"),
+            Op::Noop => (),
         }
         Status::Continue(false)
     }
@@ -218,7 +371,8 @@ impl Game {
         let mut i = iter.next();
         let mut out = vec![];
         let halt = loop {
-            match self.vm.step(i) {
+            let r = self.vm.step(i);
+            match r {
                 Status::Continue(true) => i = iter.next(),
                 Status::Continue(false) => (),
                 Status::Halt => break true,
@@ -436,8 +590,21 @@ fn main() {
             north
             take teleporter
             use teleporter
+            take business card
+            look business card
+            take strange book
+            look strange book
         ",
     );
+
+    for i in 1..u16::MAX {
+        println!("{i}");
+        let mut game = game.clone();
+        game.vm.register[7] = i;
+        let o = game.step("use teleporter");
+        println!("{o:?}");
+    }
+    //game.autoplay("use teleporter");
 
     for line in std::io::stdin().lock().lines() {
         let (desc, halt) = game.step(&line.unwrap());
