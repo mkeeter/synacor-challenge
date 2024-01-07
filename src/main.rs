@@ -1,6 +1,6 @@
 use rayon::prelude::*;
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashSet, VecDeque},
     io::BufRead,
 };
 
@@ -450,7 +450,7 @@ impl Game {
         (desc, halt)
     }
 
-    fn autoplay(&mut self, input: &str) {
+    fn play(&mut self, input: &str) {
         for line in input.lines() {
             let line = line.trim();
             if line.is_empty() {
@@ -573,7 +573,7 @@ fn main() {
     let mut game = Game { vm };
 
     // Hard-coded sequence to enter the maze of twisty little passages
-    game.autoplay(
+    game.play(
         "
             take tablet
             use tablet
@@ -597,7 +597,7 @@ fn main() {
     game = find_room_with_item(game, &mut HashSet::new()).unwrap();
 
     // The item is a can, which lets us travel through the darkness
-    game.autoplay(
+    game.play(
         "
             take can
             use can
@@ -640,7 +640,7 @@ fn main() {
     // - blue coin = 9
     //
     // blue + red * shiny**2 + concave**3 - corroded = 399
-    game.autoplay(
+    game.play(
         "
             use blue coin
             use red coin
@@ -664,10 +664,10 @@ fn main() {
     game.vm.memory[5511] = 21; // replace calibration call with noop
     game.vm.memory[5512] = 21; // replace calibration jump with noop
 
-    game.autoplay("use teleporter");
+    game.play("use teleporter");
 
     // We're now on the beach!
-    game.autoplay(
+    game.play(
         "
             west
             north
@@ -698,9 +698,25 @@ fn main() {
     //
     //  The orb starts at weight 22 and we want to hit 30 at the vault (upper
     //  right corner)
-    game.autoplay(
+    game.play("take orb");
+
+    let path = solve_orb_grid();
+    for p in path.chars() {
+        let m = match p {
+            'N' => "north",
+            'S' => "south",
+            'E' => "east",
+            'W' => "west",
+            c => panic!("invalid direction {c:?}"),
+        };
+        game.play(m);
+    }
+
+    game.play(
         "
-            take orb
+            vault
+            take mirror
+            use mirror
         ",
     );
 
@@ -710,18 +726,118 @@ fn main() {
             break;
         }
     }
+}
 
-    /*
-    // NNN -> back
-    // SSS -> back
-    vm.input.extend(input);
+#[derive(Clone, Debug)]
+struct OrbState {
+    x: i32,
+    y: i32,
+    prev: i32,
+    pending: Option<i32>,
+    path: String,
+}
 
-    let mut input = std::io::stdin();
-    let mut output = std::io::stdout();
-    while vm.step(&mut input, &mut output) {
-        // keep going
+impl OrbState {
+    fn set_pending(&mut self, v: i32) {
+        let prev = self.pending.replace(v);
+        assert!(prev.is_none());
     }
-    */
+}
+
+/// Solve for a path through the grid
+///
+/// The map is shown below:
+/// ```
+///     3 | *  8  - 1V
+///     2 | 4  * 11  *
+///     1 | +  4  - 18       N
+///     0 | O  -  9  *     W   E
+///     ----------------     S
+///       | 0  1  2  3
+/// ```
+///
+///  The orb starts at weight 22 (at the lower-right, `O`) and we want to hit 30
+///  at the vault (upper right corner, `1V`).
+fn solve_orb_grid() -> String {
+    let mut todo = VecDeque::new();
+    todo.push_back(OrbState {
+        x: 3,
+        y: 3,
+        prev: 30,
+        pending: Some(i32::MAX), // marker for the start
+        path: String::new(),
+    });
+    while let Some(mut s) = todo.pop_front() {
+        match (s.x, s.y) {
+            // Numerical values
+            (3, 3) => {
+                if s.pending.take() == Some(i32::MAX) {
+                    s.set_pending(1);
+                } else {
+                    // Can't re-enter the vault room
+                    continue;
+                }
+            }
+            (1, 3) => s.set_pending(8),
+            (0, 2) => s.set_pending(4),
+            (2, 2) => s.set_pending(11),
+            (1, 1) => s.set_pending(4),
+            (3, 1) => s.set_pending(18),
+            (0, 0) => {
+                if s.prev == 22 {
+                    let mut flipped = String::new();
+                    while let Some(c) = s.path.pop() {
+                        flipped.push(c);
+                    }
+                    return flipped;
+                } else {
+                    // The orb evaporates if you re-enter its room
+                    continue;
+                }
+            }
+            (2, 0) => s.set_pending(9),
+
+            // Multiplication nodes (which become division)
+            (0, 3) | (1, 2) | (3, 2) | (3, 0) => {
+                // Easy exit if we can't do the division
+                let p = s.pending.take().unwrap();
+                if s.prev % p == 0 {
+                    s.prev /= p;
+                } else {
+                    continue;
+                }
+            }
+
+            // Addition nodes (which become subtraction)
+            (0, 1) => {
+                let p = s.pending.take().unwrap();
+                s.prev -= p;
+                if s.prev < 0 {
+                    continue;
+                }
+            }
+            // Subtraction nodes (which become addition)
+            (1, 0) | (2, 1) | (2, 3) => {
+                let p = s.pending.take().unwrap();
+                s.prev += p;
+            }
+            // Off-grid values
+            (4..=i32::MAX, _)
+            | (_, 4..=i32::MAX)
+            | (i32::MIN..=-1, _)
+            | (_, i32::MIN..=-1) => continue,
+        }
+        for (dx, dy, c) in
+            [(1, 0, 'W'), (-1, 0, 'E'), (0, 1, 'S'), (0, -1, 'N')]
+        {
+            let mut s = s.clone();
+            s.x += dx;
+            s.y += dy;
+            s.path.push(c);
+            todo.push_back(s);
+        }
+    }
+    panic!("could not find valid path");
 }
 
 /// Rust implementation of the teleportation checksum procedure
