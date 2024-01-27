@@ -1,8 +1,5 @@
 use rayon::prelude::*;
-use std::{
-    collections::{BTreeMap, HashSet, VecDeque},
-    io::BufRead,
-};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
 const CHALLENGE: &[u8] = include_bytes!("../challenge.bin");
 const MASK: u16 = 32767;
@@ -13,6 +10,7 @@ struct Vm {
     register: [u16; 8],
     stack: Vec<u16>,
     ip: usize,
+    calls: BTreeMap<u16, BTreeSet<u16>>,
 }
 
 #[derive(Clone, Eq, PartialEq, Hash)]
@@ -155,7 +153,7 @@ impl Memory {
                 Op::In(a)
             }
             21 => Op::Noop,
-            i => panic!("unimplemented instruction {i}"),
+            i => Op::Unknown(i),
         }
     }
 
@@ -165,8 +163,9 @@ impl Memory {
         let mut seen = BTreeMap::new();
         let mut todo = vec![ip];
         while let Some(mut ip) = todo.pop() {
+            let prev_ip = ip;
             let op = self.read(&mut ip);
-            if seen.insert(ip, op).is_none() {
+            if seen.insert(prev_ip, op).is_none() {
                 if !matches!(op, Op::Ret) {
                     todo.push(ip);
                 }
@@ -182,6 +181,373 @@ impl Memory {
         for (ip, op) in seen {
             println!("{ip}: {op}");
         }
+    }
+
+    /// Disassemble all functions found in program
+    #[allow(unused)]
+    fn disassemble_all(&self, calls: &BTreeMap<u16, BTreeSet<u16>>) {
+        let mut seen: BTreeMap<usize, BTreeMap<usize, Op>> = BTreeMap::new();
+        let mut todo = BTreeSet::new();
+        todo.insert((0, 0));
+        todo.insert((2756, 2756));
+        todo.extend(
+            calls
+                .values()
+                .flat_map(|v| v.iter().map(|k| (*k as usize, *k as usize))),
+        );
+        while let Some((base, mut ip)) = todo.pop_first() {
+            let prev_ip = ip;
+            let op = self.read(&mut ip);
+            if seen.entry(base).or_default().insert(prev_ip, op).is_none() {
+                if !matches!(op, Op::Ret) {
+                    todo.insert((base, ip));
+                }
+                match op {
+                    Op::Jmp(Value::Literal(a)) => {
+                        if a != 2756 {
+                            todo.insert((base, a as usize));
+                        }
+                    }
+                    Op::Jt(_, Value::Literal(a)) => {
+                        todo.insert((base, a as usize));
+                    }
+                    Op::Jf(_, Value::Literal(a)) => {
+                        todo.insert((base, a as usize));
+                    }
+                    Op::Jmp(..) | Op::Jt(..) | Op::Jf(..) => print!("OH NO"),
+                    Op::Call(Value::Literal(a)) => {
+                        todo.insert((a as usize, a as usize));
+                    }
+                    _ => (),
+                }
+            }
+        }
+        let mut already_printed: BTreeSet<usize> = BTreeSet::new();
+        for (base, instructions) in &seen {
+            if instructions.keys().any(|i| already_printed.contains(i)) {
+                continue;
+            }
+            println!("--------------------------------------------------\n");
+            println!("{base}:");
+            let mut known_reg_values = BTreeMap::new();
+            let mut prev_string = String::new();
+            let mut prev = *instructions.first_key_value().unwrap().0;
+            for (&ip, &op) in instructions {
+                if ip != prev || (seen.contains_key(&ip) && ip != *base) {
+                    break;
+                }
+                prev = ip + op.len();
+
+                already_printed.insert(ip);
+                print!("{ip}: {op}");
+                if let Op::Call(Value::Register(..)) = op {
+                    if let Some(t) = calls.get(&ip.try_into().unwrap()) {
+                        println!(" {:?}", t);
+                    } else {
+                        println!(" [?]");
+                    }
+                } else if matches!(op, Op::Call(Value::Literal(1540)))
+                    && known_reg_values.contains_key(&0)
+                {
+                    let r0 = known_reg_values[&0] as usize;
+                    let len = self.0[r0] as usize;
+                    print!(" \"");
+                    let mut printed_newline = false;
+                    if r0 + 1 + len <= self.0.len() {
+                        for c in &self.0[r0 + 1..][..len] {
+                            let c = char::from_u32(*c as u32).unwrap();
+                            print!("{}", c.escape_default());
+                        }
+                    } else {
+                        print!("??");
+                    }
+                    println!(" \"");
+                } else if let Op::Out(Value::Literal(c)) = op {
+                    let c = char::from_u32(c as u32).unwrap();
+                    if c == '\n' {
+                        if !prev_string.is_empty() {
+                            println!(" {prev_string:?}");
+                            prev_string.clear();
+                        } else {
+                            println!();
+                        }
+                    } else {
+                        prev_string.push(c);
+                        println!();
+                    }
+                } else if matches!(op, Op::Call(Value::Literal(1480)))
+                    && known_reg_values.contains_key(&0)
+                    && known_reg_values.get(&1) == Some(&1553) // xor print
+                    && known_reg_values.contains_key(&2)
+                {
+                    let r0 = known_reg_values[&0] as usize;
+                    let key = known_reg_values[&2];
+                    let len = self.0[r0];
+                    print!(" \"");
+                    let mut printed_newline = false;
+                    if r0 + 1 + len as usize <= self.0.len() {
+                        for i in &self.0[r0 + 1..][..len as usize] {
+                            let c = i ^ key;
+                            let c = char::from_u32(c as u32).unwrap();
+                            print!("{}", c.escape_default());
+                        }
+                    } else {
+                        print!("??");
+                    }
+                    println!("\"");
+                } else {
+                    println!();
+                }
+
+                match op {
+                    Op::Set(Register(i), Value::Literal(v)) => {
+                        known_reg_values.insert(i, v);
+                    }
+                    Op::Add(
+                        Register(i),
+                        Value::Literal(a),
+                        Value::Literal(b),
+                    ) => {
+                        known_reg_values.insert(i, a.wrapping_add(b) & 0x7FFF);
+                    }
+                    Op::Pop(r) => {
+                        let _ = known_reg_values.remove(&r.0);
+                    }
+                    Op::Call(..) => {
+                        known_reg_values.clear();
+                    }
+                    _ => (),
+                }
+            }
+            println!();
+        }
+    }
+
+    /// Disassemble all functions found in program
+    #[allow(unused)]
+    fn disassemble_all_html(&self, calls: &BTreeMap<u16, BTreeSet<u16>>) {
+        let mut seen: BTreeMap<usize, BTreeMap<usize, Op>> = BTreeMap::new();
+        let mut todo = BTreeSet::new();
+        let mut html = std::fs::File::create("out.html").unwrap();
+        use std::io::Write;
+        write!(
+            &mut html,
+            r#"
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+<meta charset="utf-8">
+<title>The Annotated Synacor Challenge</title>
+<style>
+body {{
+  font-family: Inconsolata, "Courier New", monospace;
+  background-color: #282b2e;
+  color: #e0e2e4;
+}}
+.op {{
+  color: #93c763;
+}}
+.unknown {{
+  color: #818e96;
+}}
+.comment {{
+  color: #818e96;
+}}
+.line {{
+  color: #ffcd22;
+}}
+.lit {{
+  color: #ffcd22;
+}}
+.char {{
+  color: #ec7600;
+}}
+.text {{
+  color: #8cbbad;
+}}
+.reg {{
+  color: #a082bd;
+}}
+a {{
+  text-decoration: none;
+  border-bottom:1px solid #ffcd22;
+}}
+</style>
+<link href="/fonts/inconsolata/v30/inconsolata.css" rel="stylesheet">
+</head>
+
+<body>
+"#
+        );
+
+        let out = todo.insert((0, 0));
+        todo.insert((2756, 2756));
+        todo.extend(
+            calls
+                .values()
+                .flat_map(|v| v.iter().map(|k| (*k as usize, *k as usize))),
+        );
+        while let Some((base, mut ip)) = todo.pop_first() {
+            let prev_ip = ip;
+            let op = self.read(&mut ip);
+            if seen.entry(base).or_default().insert(prev_ip, op).is_none() {
+                if !matches!(op, Op::Ret) {
+                    todo.insert((base, ip));
+                }
+                match op {
+                    Op::Jmp(Value::Literal(a)) => {
+                        if a != 2756 {
+                            todo.insert((base, a as usize));
+                        }
+                    }
+                    Op::Jt(_, Value::Literal(a)) => {
+                        todo.insert((base, a as usize));
+                    }
+                    Op::Jf(_, Value::Literal(a)) => {
+                        todo.insert((base, a as usize));
+                    }
+                    Op::Jmp(..) | Op::Jt(..) | Op::Jf(..) => print!("OH NO"),
+                    Op::Call(Value::Literal(a)) => {
+                        todo.insert((a as usize, a as usize));
+                    }
+                    Op::Call(Value::Register(..)) => {
+                        if let Some(t) = calls.get(&ip.try_into().unwrap()) {
+                            for &t in t {
+                                todo.insert((t as usize, t as usize));
+                            }
+                        }
+                    }
+                    _ => (),
+                }
+            }
+        }
+        let mut already_printed: BTreeSet<usize> = BTreeSet::new();
+        for (base, instructions) in &seen {
+            if instructions.keys().any(|i| already_printed.contains(i)) {
+                continue;
+            }
+            writeln!(&mut html, "<br>");
+            writeln!(&mut html, "<div>");
+            if let Some(name) = addr_to_name(*base as u16) {
+                writeln!(
+                    &mut html,
+                    "<span class=\"comment\">{name}:</span><br>"
+                );
+            }
+            let mut known_reg_values = BTreeMap::new();
+            let mut prev_string = String::new();
+            let mut prev = *instructions.first_key_value().unwrap().0;
+            for (&ip, &op) in instructions {
+                if ip != prev || (seen.contains_key(&ip) && ip != *base) {
+                    break;
+                }
+                prev = ip + op.len();
+
+                already_printed.insert(ip);
+                write!(
+                    &mut html,
+                    "<span class=\"line\" id=\"f{ip}\">{ip}</span>:",
+                );
+                for i in format!("{ip}").len()..5 {
+                    write!(&mut html, "&nbsp;");
+                }
+
+                write!(&mut html, "{}", HtmlOp(op));
+                if let Op::Call(Value::Register(..)) = op {
+                    if let Some(t) = calls.get(&ip.try_into().unwrap()) {
+                        for (i, t) in t.iter().enumerate() {
+                            if i > 0 {
+                                write!(&mut html, ", ");
+                            }
+                            write!(
+                                &mut html,
+                                " {}",
+                                HtmlJump(Value::Literal(*t))
+                            );
+                        }
+                    } else {
+                        write!(&mut html, " [?]");
+                    }
+                } else if matches!(op, Op::Call(Value::Literal(1540)))
+                    && known_reg_values.contains_key(&0)
+                {
+                    let r0 = known_reg_values[&0] as usize;
+                    let len = self.0[r0] as usize;
+                    write!(&mut html, " <span class=\"text\">\"");
+                    let mut printed_newline = false;
+                    if r0 + 1 + len <= self.0.len() {
+                        for c in &self.0[r0 + 1..][..len] {
+                            let c = char::from_u32(*c as u32).unwrap();
+                            write!(&mut html, "{}", c.escape_default());
+                        }
+                    } else {
+                        write!(&mut html, "??");
+                    }
+                    writeln!(&mut html, " \"</span>");
+                } else if let Op::Out(Value::Literal(c)) = op {
+                    let c = char::from_u32(c as u32).unwrap();
+                    if c == '\n' {
+                        if !prev_string.is_empty() {
+                            write!(
+                                &mut html,
+                                " <span class=\"text\">{prev_string:?}</span>"
+                            );
+                            prev_string.clear();
+                        }
+                    } else {
+                        prev_string.push(c);
+                    }
+                } else if matches!(op, Op::Call(Value::Literal(1480)))
+                    && known_reg_values.contains_key(&0)
+                    && known_reg_values.get(&1) == Some(&1553) // xor print
+                    && known_reg_values.contains_key(&2)
+                {
+                    let r0 = known_reg_values[&0] as usize;
+                    let key = known_reg_values[&2];
+                    let len = self.0[r0];
+                    write!(&mut html, " <span class=\"text\">\"");
+                    let mut printed_newline = false;
+                    if r0 + 1 + len as usize <= self.0.len() {
+                        for i in &self.0[r0 + 1..][..len as usize] {
+                            let c = i ^ key;
+                            let c = char::from_u32(c as u32).unwrap();
+                            write!(&mut html, "{}", c.escape_default());
+                        }
+                    } else {
+                        write!(&mut html, "??");
+                    }
+                    write!(&mut html, "\"</span>");
+                }
+
+                match op {
+                    Op::Set(Register(i), Value::Literal(v)) => {
+                        known_reg_values.insert(i, v);
+                    }
+                    Op::Add(
+                        Register(i),
+                        Value::Literal(a),
+                        Value::Literal(b),
+                    ) => {
+                        known_reg_values.insert(i, a.wrapping_add(b) & 0x7FFF);
+                    }
+                    Op::Pop(r) => {
+                        let _ = known_reg_values.remove(&r.0);
+                    }
+                    Op::Call(..) => {
+                        known_reg_values.clear();
+                    }
+                    _ => (),
+                }
+
+                if !matches!(op, Op::Out(Value::Literal(..))) {
+                    prev_string.clear();
+                }
+                writeln!(&mut html, "<br>");
+            }
+            writeln!(&mut html, "</div>");
+        }
+        write!(&mut html, "</body></html>");
     }
 }
 
@@ -209,6 +575,37 @@ enum Op {
     Out(Value),
     In(Register),
     Noop,
+    Unknown(u16),
+}
+
+impl Op {
+    fn len(&self) -> usize {
+        match self {
+            Op::Halt => 1,
+            Op::Set(..) => 3,
+            Op::Push(..) => 2,
+            Op::Pop(..) => 2,
+            Op::Eq(..) => 4,
+            Op::Gt(..) => 4,
+            Op::Jmp(..) => 2,
+            Op::Jt(..) => 3,
+            Op::Jf(..) => 3,
+            Op::Add(..) => 4,
+            Op::Mult(..) => 4,
+            Op::Mod(..) => 4,
+            Op::And(..) => 4,
+            Op::Or(..) => 4,
+            Op::Not(..) => 3,
+            Op::Rmem(..) => 3,
+            Op::Wmem(..) => 3,
+            Op::Call(..) => 2,
+            Op::Ret => 1,
+            Op::Out(..) => 2,
+            Op::In(..) => 2,
+            Op::Noop => 1,
+            Op::Unknown(..) => 1,
+        }
+    }
 }
 
 impl std::fmt::Display for Op {
@@ -228,14 +625,219 @@ impl std::fmt::Display for Op {
             Op::Mod(a, b, c) => write!(f, "{a} = {b} % {c}"),
             Op::And(a, b, c) => write!(f, "{a} = {b} & {c}"),
             Op::Or(a, b, c) => write!(f, "{a} = {b} | {c}"),
-            Op::Not(a, b) => write!(f, "not  {a} = !{b}"),
+            Op::Not(a, b) => write!(f, "{a} = !{b}"),
             Op::Rmem(a, b) => write!(f, "rmem {a} {b}"),
             Op::Wmem(a, b) => write!(f, "wmem {a} {b}"),
             Op::Call(a) => write!(f, "call {a}"),
             Op::Ret => write!(f, "ret"),
-            Op::Out(a) => write!(f, "out  {a}"),
+            Op::Out(a) => match a {
+                Value::Literal(c) => {
+                    write!(f, "out  {:?}", char::from_u32(*c as u32).unwrap())
+                }
+                Value::Register(r) => write!(f, "out  {r}"),
+            },
             Op::In(a) => write!(f, "in   {a}"),
             Op::Noop => write!(f, "noop"),
+            Op::Unknown(a) => write!(f, "[{a}]"),
+        }
+    }
+}
+
+struct HtmlOp(Op);
+struct HtmlReg(Register);
+struct HtmlValue(Value);
+struct HtmlJump(Value);
+
+impl std::fmt::Display for HtmlReg {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "<span class=\"reg\">{}</span>", self.0)
+    }
+}
+
+impl std::fmt::Display for HtmlValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self.0 {
+            Value::Register(r) => write!(f, "{}", HtmlReg(r)),
+            Value::Literal(i) => write!(f, "<span class=\"lit\">{i}</span>"),
+        }
+    }
+}
+
+fn addr_to_name(addr: u16) -> Option<&'static str> {
+    let out = match addr {
+        0 => "self-test",
+        1480 => "map",
+        1540 => "print",
+        1550 => "putc",
+        1553 => "xor-putc",
+        1689 => "strcmp",
+        1745 => "decrypt-data",
+        2147 => "xor",
+        2756 => "game-loop",
+        2986 => "look",
+        1789 => "read-user-input",
+        1863 => "print-code",
+        5836 => "print-list-item",
+        3422 => "take-item",
+        3590 => "use-item",
+        4555 => "vault-door",
+        4742 => "use-tablet",
+        4821 => "use-can",
+        4907 => "use-lantern",
+        4999 => "use-coin",
+        5467 => "use-teleporter",
+        5743 => "use-mirror",
+        2023 => "print-number",
+        5382 => "use-red-coin",
+        5399 => "use-corroded-coin",
+        5416 => "use-shiny-coin",
+        5433 => "use-concave-coin",
+        5450 => "use-blue-coin",
+        4682 => "reset-orb",
+        2171 => "add-with-overflow-check",
+        2180 => "sub-with-overflow-check",
+        2200 => "mul-with-overflow-check",
+        4301 => "orb-enter-number-room",
+        4240 => "orb-enter-symbol-room",
+        _ => return None,
+    };
+    Some(out)
+}
+
+impl std::fmt::Display for HtmlJump {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self.0 {
+            Value::Literal(i) => {
+                if let Some(name) = addr_to_name(i) {
+                    write!(
+                        f,
+                        "<a href=\"#f{i}\"><span class=\"lit\">{i}({name})</span></a>"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "<a href=\"#f{i}\"><span class=\"lit\">{i}</span></a>"
+                    )
+                }
+            }
+            Value::Register(r) => write!(f, "{}", HtmlReg(r)),
+        }
+    }
+}
+
+impl std::fmt::Display for HtmlOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self.0 {
+            Op::Halt => write!(f, "<span class=\"op\">halt<span>"),
+            Op::Set(a, b) => write!(f, "{} = {}", HtmlReg(a), HtmlValue(b)),
+            Op::Push(a) => {
+                write!(f, "<span class=\"op\">push</span> {}", HtmlValue(a))
+            }
+            Op::Pop(a) => {
+                write!(f, "<span class=\"op\">pop</span>  {}", HtmlReg(a))
+            }
+            Op::Eq(a, b, c) => write!(
+                f,
+                "{}  = {} == {}",
+                HtmlReg(a),
+                HtmlValue(b),
+                HtmlValue(c)
+            ),
+            Op::Gt(a, b, c) => write!(
+                f,
+                "{} = {} > {}",
+                HtmlReg(a),
+                HtmlValue(b),
+                HtmlValue(c)
+            ),
+            Op::Jmp(a) => {
+                write!(f, "<span class=\"op\">jmp</span>  {}", HtmlJump(a))
+            }
+            Op::Jt(a, b) => write!(
+                f,
+                "<span class=\"op\">jt</span>   {} {}",
+                HtmlValue(a),
+                HtmlJump(b)
+            ),
+            Op::Jf(a, b) => write!(
+                f,
+                "<span class=\"op\">jf</span>   {} {}",
+                HtmlValue(a),
+                HtmlJump(b)
+            ),
+            Op::Add(a, b, c) => write!(
+                f,
+                "{} = {} + {}",
+                HtmlReg(a),
+                HtmlValue(b),
+                HtmlValue(c)
+            ),
+            Op::Mult(a, b, c) => write!(
+                f,
+                "{} = {} * {}",
+                HtmlReg(a),
+                HtmlValue(b),
+                HtmlValue(c)
+            ),
+            Op::Mod(a, b, c) => write!(
+                f,
+                "{} = {} % {}",
+                HtmlReg(a),
+                HtmlValue(b),
+                HtmlValue(c)
+            ),
+            Op::And(a, b, c) => write!(
+                f,
+                "{} = {} & {}",
+                HtmlReg(a),
+                HtmlValue(b),
+                HtmlValue(c)
+            ),
+            Op::Or(a, b, c) => write!(
+                f,
+                "{} = {} | {}",
+                HtmlReg(a),
+                HtmlValue(b),
+                HtmlValue(c)
+            ),
+            Op::Not(a, b) => write!(f, "{} = !{}", HtmlReg(a), HtmlValue(b)),
+            Op::Rmem(a, b) => {
+                write!(
+                    f,
+                    "<span class=\"op\">rmem</span> {} {}",
+                    HtmlReg(a),
+                    HtmlValue(b)
+                )
+            }
+            Op::Wmem(a, b) => {
+                write!(
+                    f,
+                    "<span class=\"op\">wmem</span> {} {}",
+                    HtmlValue(a),
+                    HtmlValue(b)
+                )
+            }
+            Op::Call(a) => {
+                write!(f, "<span class=\"op\">call</span> {}", HtmlJump(a))
+            }
+            Op::Ret => write!(f, "<span class=\"op\">ret</span>"),
+            Op::Out(a) => match a {
+                Value::Literal(c) => {
+                    write!(
+                        f,
+                        "<span class=\"op\">out</span>  <span class=\"char\">{:?}</span>",
+                        char::from_u32(c as u32).unwrap()
+                    )
+                }
+                Value::Register(r) => {
+                    write!(f, "<span class=\"op\">out</span>  {}", HtmlReg(r))
+                }
+            },
+            Op::In(a) => {
+                write!(f, "<span class=\"op\">in</span>   {}", HtmlReg(a))
+            }
+            Op::Noop => write!(f, "<span class=\"op\">noop</span>"),
+            Op::Unknown(a) => write!(f, "<span class=\"unknown\">[{a}]</span>"),
         }
     }
 }
@@ -316,6 +918,7 @@ impl Vm {
             register: [0; 8],
             stack: vec![],
             ip: 0,
+            calls: BTreeMap::new(),
         }
     }
 
@@ -380,14 +983,28 @@ impl Vm {
             }
             Op::Rmem(a, b) => {
                 self[a] = self.memory[self.get(b)];
+                if self.get(b) == 6147 {
+                    println!("read 6147: {} at {}", self[a], self.ip);
+                }
             }
             Op::Wmem(a, b) => {
                 let a = self.get(a);
-                self.memory[a] = self.get(b)
+                self.memory[a] = self.get(b);
+                if a == 6151 {
+                    println!("mutated at {}", self.ip);
+                }
+                if a == 6147 {
+                    println!("wrote 6147: {} at {}", self.memory[a], self.ip);
+                }
             }
             Op::Call(a) => {
                 self.stack.push(self.ip.try_into().unwrap());
-                self.ip = self.get(a) as usize;
+                let target = self.get(a);
+                self.calls
+                    .entry((self.ip - 2).try_into().unwrap())
+                    .or_default()
+                    .insert(target);
+                self.ip = target as usize;
             }
             Op::Ret => {
                 let Some(r) = self.stack.pop() else {
@@ -409,6 +1026,7 @@ impl Vm {
                 return Status::Continue(true);
             }
             Op::Noop => (),
+            Op::Unknown(..) => panic!("unknown opcode during execution"),
         }
         Status::Continue(false)
     }
@@ -658,7 +1276,13 @@ fn main() {
     );
 
     // Finding the checksum is a bit slow, but not egregious
-    game.vm.register[7] = find_checksum();
+    let start = std::time::Instant::now();
+    game.vm.register[7] = 25734; //find_checksum();
+    println!(
+        "solved in {:?}, got {}",
+        start.elapsed(),
+        game.vm.register[7]
+    );
 
     game.vm.memory[5507] = 6; // Preload r0 with the correct answer
     game.vm.memory[5511] = 21; // replace calibration call with noop
@@ -720,12 +1344,60 @@ fn main() {
         ",
     );
 
+    let mut orig = Vm::new(CHALLENGE);
+    while orig.ip != 2756 {
+        orig.step(None);
+    }
+    orig.memory.disassemble_all(&game.vm.calls);
+    orig.memory.disassemble_all_html(&game.vm.calls);
+    use std::io::Write;
+    let mut f = std::fs::File::create("decrypted.bin").unwrap();
+    for b in &orig.memory.0 {
+        f.write_all(&b.to_le_bytes()).unwrap();
+    }
+
+    let mut i = 0;
+    while i < orig.memory.0.len() as u16 {
+        let n = orig.memory[i];
+        let mut all_ascii = true;
+        let mut out = String::new();
+        for j in 0..n {
+            match orig.memory.0.get((i + 1 + j) as usize) {
+                Some(c) => {
+                    let c = char::from_u32(*c as u32).unwrap();
+                    all_ascii &= c.is_ascii_alphanumeric()
+                        || c.is_ascii_punctuation()
+                        || c.is_ascii_whitespace();
+                    if !all_ascii {
+                        break;
+                    }
+                    out.push(c);
+                }
+                None => {
+                    all_ascii = false;
+                    break;
+                }
+            }
+        }
+        if all_ascii && !out.is_empty() {
+            println!("{i}: {out:?}");
+        } else {
+            out.clear();
+        }
+        i += 1 + out.len() as u16;
+    }
+
+    println!("{:?}", &game.vm.memory.0[6147..6200]);
+
+    /*
+    use std::io::BufRead;
     for line in std::io::stdin().lock().lines() {
         let (_desc, halt) = game.step(&line.unwrap());
         if halt {
             break;
         }
     }
+    */
 }
 
 #[derive(Clone, Debug)]
@@ -909,3 +1581,53 @@ fn find_checksum() -> u16 {
         })
         .unwrap()
 }
+
+const INLINE_NOTES: &[(usize, &str)] = &[
+    (
+        1703,
+        indoc::indoc! {"
+            if len(s1) != len(s2)
+              return 0
+            v = len(s1) | len(s2)
+            if v == 0
+              return 1
+            prepare to call map with per-character comparison
+
+            per-character comparison failed, return false
+    "},
+    ),
+    (
+        1789,
+        indoc::indoc! {"
+            end = address + length
+            current address in r0
+            total length?
+            address++
+            if address > end
+                 break
+            read a character into r4
+            if 'c' == '\n'
+                 break
+            *address = c
+            length++
+            loop
+            *start = length
+            if last char == '\n'
+              break
+            read char
+            loop
+    "},
+    ),
+];
+
+const FUNCTION_NAMES: &[(usize, &'static str)] = &[
+    (1480, "map"),
+    (1540, "print"),
+    (1550, "putc"),
+    (1553, "xor-putc"),
+    (1689, "strcmp"),
+    (1745, "decrypt-data"),
+    (2147, "xor"),
+    (1789, "read-user-input"),
+    (5836, "print-list-item"),
+];
